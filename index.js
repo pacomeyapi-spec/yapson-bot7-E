@@ -141,8 +141,9 @@ async function payout(item, network) {
     body:JSON.stringify({ amount:item.montant, recipient_phone:item.phone, network:uuid }),
   });
   const body = await res.json().catch(()=>({}));
+  // Log la réponse complète pour debug
+  addLog('info', `  🔍 Payout réponse [${res.status}]: ${JSON.stringify(body).substring(0,120)}`);
   if (res.status===200||res.status===201) {
-    // Récupérer uid depuis la réponse ou depuis l'API transactions par téléphone
     const uid = body.uid || body.id || body.reference || null;
     return { ok:true, uid, phone: item.phone, montant: item.montant };
   }
@@ -156,6 +157,14 @@ async function waitForSuccess(uid, phone, maxWait=120000) {
     await sleep(5000);
     try {
       let tx = null;
+      // Normaliser le numéro: 0XXXXXXXXX <-> 225XXXXXXXXX
+      function normalizePhone(p) {
+        const s = String(p).replace(/[^0-9]/g,'');
+        if (s.startsWith('225')) return s.substring(3); // 2250XXXXXXXX -> 0XXXXXXXX
+        if (s.startsWith('0') && s.length === 10) return s; // 0XXXXXXXX ok
+        return s;
+      }
+      const phoneNorm = normalizePhone(phone);
       // Si uid connu: appel direct
       if (uid) {
         const res = await fetch(`https://connect.yapson.net/api/aggregator/transactions/${uid}/`, {
@@ -163,15 +172,18 @@ async function waitForSuccess(uid, phone, maxWait=120000) {
         });
         tx = await res.json();
       } else {
-        // Chercher par téléphone dans les 10 dernières transactions
-        const res = await fetch('https://connect.yapson.net/api/aggregator/transactions/?limit=20', {
+        // Chercher par téléphone dans les 50 dernières transactions
+        const res = await fetch('https://connect.yapson.net/api/aggregator/transactions/?limit=50', {
           headers: yapH(),
         });
         const data = await res.json();
         const results = data.results || data.data || [];
-        tx = results.find(t => t.recipient_phone === phone && (t.status === 'pending' || t.status === 'success'));
+        tx = results.find(t => {
+          const tNorm = normalizePhone(t.recipient_phone);
+          return tNorm === phoneNorm && (t.status === 'pending' || t.status === 'success');
+        });
       }
-      if (!tx) { addLog('info', `⏳ Transaction introuvable pour ${phone}...`); continue; }
+      if (!tx) { addLog('info', `⏳ Transaction introuvable pour ${phone} (${phoneNorm})...`); continue; }
       if (tx.status === 'success') return { ok:true, tx };
       if (tx.status === 'failed')  return { ok:false, err:`Transaction échouée: ${tx.error_message||''}` };
       addLog('info', `⏳ ${(tx.uid||phone).substring(0,8)} status=${tx.status}...`);
@@ -180,7 +192,7 @@ async function waitForSuccess(uid, phone, maxWait=120000) {
   return { ok:false, err:'Timeout — transaction non confirmée après 2min' };
 }
 
-// ── Générer une image PNG valide de la transaction ────────────
+// ── Générer une image JPEG valide de la transaction ───────────
 async function generateTxScreenshot(tx) {
   const dt = (tx.completed_at || tx.created_at || new Date().toISOString()).replace('T',' ').substring(0,19);
   const ref = (tx.reference || tx.uid || 'N/A').substring(0,40);
@@ -188,61 +200,66 @@ async function generateTxScreenshot(tx) {
   const amount = tx.amount || '';
   const network = tx.network_name || '';
 
-  // PNG 1x1 blanc valide (header PNG minimal)
-  // On crée un PNG de 400x200 avec du texte via des bytes bruts
-  // Approche: encoder un PNG valide via Buffer avec les bytes corrects
-  // PNG signature + IHDR + IDAT (données compressées) + IEND
-
-  // PNG minimal 400x200 blanc (généré via zlib)
+  // Créer un PNG 400x300 avec données réelles via zlib
   const zlib = require('zlib');
-  const width = 400, height = 200;
+  const width = 400, height = 300;
 
-  // Créer les données brutes de l'image (RGBA)
-  const raw = Buffer.alloc(height * (1 + width * 4));
-  for(let y=0; y<height; y++){
-    raw[y*(width*4+1)] = 0; // filter byte
-    for(let x=0; x<width; x++){
-      const i = y*(width*4+1) + 1 + x*4;
-      // Fond blanc
-      raw[i]=255; raw[i+1]=255; raw[i+2]=255; raw[i+3]=255;
+  // Image avec fond bleu foncé et texte simulé via pixels colorés
+  const raw = Buffer.alloc(height * (1 + width * 3));
+  for (let y = 0; y < height; y++) {
+    raw[y * (width * 3 + 1)] = 0; // filter type none
+    for (let x = 0; x < width; x++) {
+      const i = y * (width * 3 + 1) + 1 + x * 3;
+      // Fond: bleu foncé (#0d1117)
+      raw[i]   = 13;  // R
+      raw[i+1] = 17;  // G
+      raw[i+2] = 23;  // B
+
+      // Bande verte en haut (succès)
+      if (y < 40) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
+
+      // Bande blanche pour texte (simulé)
+      if (y > 50 && y < 70 && x > 20 && x < 380) { raw[i]=255; raw[i+1]=255; raw[i+2]=255; }
+      if (y > 90 && y < 110 && x > 20 && x < 300) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+      if (y > 130 && y < 150 && x > 20 && x < 250) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+      if (y > 170 && y < 190 && x > 20 && x < 200) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+      if (y > 210 && y < 230 && x > 20 && x < 220) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+
+      // Bordure verte
+      if (x < 4 || x > width-5 || y < 4 || y > height-5) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
     }
   }
-
-  // Dessiner du texte simple (pas de font, juste colorer des pixels)
-  // Approche: créer un PNG blanc avec texte en noir simulé
-  // On va plutôt créer une image JPEG simple via un buffer pré-encodé
-  // Le plus simple: utiliser un PNG 1px * 1px blanc répété
 
   const compressed = zlib.deflateSync(raw);
 
   function crc32(buf) {
+    const table = new Array(256).fill(0).map((_,i) => {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      return c >>> 0;
+    });
     let crc = 0xFFFFFFFF;
-    const table = [];
-    for(let i=0;i<256;i++){
-      let c=i;
-      for(let j=0;j<8;j++) c = (c&1) ? (0xEDB88320^(c>>>1)) : (c>>>1);
-      table[i]=c;
-    }
-    for(let i=0;i<buf.length;i++) crc = table[(crc^buf[i])&0xFF]^(crc>>>8);
-    return (crc^0xFFFFFFFF)>>>0;
+    for (const b of buf) crc = table[(crc ^ b) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
   }
 
   function chunk(type, data) {
     const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
     const t = Buffer.from(type);
-    const crcBuf = Buffer.concat([t, data]);
-    const c = Buffer.alloc(4); c.writeUInt32BE(crc32(crcBuf));
+    const body = Buffer.concat([t, data]);
+    const c = Buffer.alloc(4); c.writeUInt32BE(crc32(body));
     return Buffer.concat([len, t, data, c]);
   }
 
-  const sig = Buffer.from([137,80,78,71,13,10,26,10]);
+  const sig  = Buffer.from([137,80,78,71,13,10,26,10]);
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width,0); ihdr.writeUInt32BE(height,4);
-  ihdr[8]=8; ihdr[9]=2; ihdr[10]=0; ihdr[11]=0; ihdr[12]=0;
-  const idat = chunk('IDAT', compressed);
-  const png = Buffer.concat([sig, chunk('IHDR',ihdr), idat, chunk('IEND',Buffer.alloc(0))]);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 2;  // color type RGB
+  const png = Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', compressed), chunk('IEND', Buffer.alloc(0))]);
 
-  return { buffer: png, mimeType: 'image/png', filename: 'transaction.png' };
+  return { buffer: png, mimeType: 'image/png', filename: 'confirmation.png' };
 }
 
 // ── Confirmation avec fichier ─────────────────────────────────
