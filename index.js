@@ -379,8 +379,8 @@ async function runCycle() {
         addLog('ok', `  ✔ Décaissé: ${item.phone} → ${item.montant.toLocaleString()} FCFA (uid: ${payResult.uid?.substring(0,8)}...)`);
 
         // 2. Si fichier requis: attendre SUCCESS + screenshot
-        if (filesRequired && payResult.uid) {
-          addLog('info', `  ⏳ Attente confirmation yapson (uid: ${payResult.uid.substring(0,8)}...)...`);
+        if (filesRequired) {  // Toujours attendre si fichier requis
+          addLog('info', `  ⏳ Attente confirmation yapson pour ${item.phone} (uid: ${(payResult.uid||'?').substring(0,8)})...`);
           const waitResult = await waitForSuccess(payResult.uid, item.phone);
 
           if (!waitResult.ok) {
@@ -390,10 +390,11 @@ async function runCycle() {
             continue;
           }
 
-          addLog('ok', `  ✔ Transaction SUCCESS sur yapson`);
+          addLog('ok', `  ✔ Transaction SUCCESS: ${waitResult.tx?.uid?.substring(0,8)||'?'}`);
 
-          // Générer screenshot de la transaction
+          // Générer screenshot PNG de la transaction
           const screenshot = await generateTxScreenshot(waitResult.tx);
+          addLog('info', `  📸 PNG ${screenshot.buffer.length} bytes`);
 
           // Confirmer avec fichier
           const confirmResult = await confirmWithFile(item, screenshot.buffer, screenshot.mimeType, screenshot.filename);
