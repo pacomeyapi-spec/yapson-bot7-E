@@ -192,96 +192,165 @@ async function waitForSuccess(uid, phone, maxWait=120000) {
   return { ok:false, err:'Timeout — transaction non confirmée après 2min' };
 }
 
-// ── Générer une image PNG valide de la transaction ────────────
+// ── Générer une capture SMS-like avec @napi-rs/canvas ─────────
 async function generateTxScreenshot(tx) {
-  const dt = (tx.completed_at || tx.created_at || new Date().toISOString()).replace('T',' ').substring(0,19);
-  const ref = (tx.reference || tx.uid || 'N/A').substring(0,40);
+  const dt = (tx.completed_at || tx.created_at || new Date().toISOString())
+    .replace('T',' ').substring(0,19);
+  const ref = tx.reference || tx.uid || 'N/A';
   const phone = tx.recipient_phone || '';
-  const amount = tx.amount || '';
-  const network = tx.network_name || '';
+  const amount = parseInt(tx.amount || 0).toLocaleString('fr-FR');
+  const network = (tx.network_name || tx.network || '').toUpperCase();
+
+  // Formatter la date au format SMS local: "le 03-05-2026 10:41:14"
+  const dateMatch = dt.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})/);
+  const dateFmt = dateMatch
+    ? `le ${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]} ${dateMatch[4]}`
+    : dt;
+
+  // ID transaction court (10 derniers chars de la ref)
+  const idTx = String(ref).replace(/[^0-9A-Z]/gi,'').slice(-10).toUpperCase();
+
+  // Couleurs en fonction du network
+  const netColors = {
+    'WAVE'    : { bg:'#1e88ff', accent:'#1e88ff' },
+    'ORANGE'  : { bg:'#ff6b00', accent:'#ff6b00' },
+    'MTN'     : { bg:'#ffd700', accent:'#000000' },
+    'MOOV'    : { bg:'#0088cc', accent:'#0088cc' },
+    'ORANGEINT': { bg:'#ff6b00', accent:'#ff6b00' },
+    'MTN CI'  : { bg:'#ffd700', accent:'#000000' },
+    'MOOV CI' : { bg:'#0088cc', accent:'#0088cc' },
+  };
+  let netKey = network;
+  for (const k of Object.keys(netColors)) {
+    if (network.includes(k.split(' ')[0])) { netKey = k; break; }
+  }
+  const colors = netColors[netKey] || { bg:'#1e88ff', accent:'#1e88ff' };
 
   try {
-    // Créer un PNG 400x300 avec données réelles via zlib
-    const zlib = require('zlib');
-    const width = 400, height = 300;
+    const { createCanvas } = require('@napi-rs/canvas');
+    const W = 600, H = 360;
+    const canvas = createCanvas(W, H);
+    const ctx = canvas.getContext('2d');
 
-    // Image avec fond bleu foncé et texte simulé via pixels colorés
-    const raw = Buffer.alloc(height * (1 + width * 3));
-    for (let y = 0; y < height; y++) {
-      raw[y * (width * 3 + 1)] = 0; // filter type none
-      for (let x = 0; x < width; x++) {
-        const i = y * (width * 3 + 1) + 1 + x * 3;
-        // Fond: bleu foncé (#0d1117)
-        raw[i]   = 13;  // R
-        raw[i+1] = 17;  // G
-        raw[i+2] = 23;  // B
+    // Fond gris clair (style messagerie)
+    ctx.fillStyle = '#f5f5f7';
+    ctx.fillRect(0, 0, W, H);
 
-        // Bande verte en haut (succès)
-        if (y < 40) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
+    // Carte SMS arrondie (rectangle blanc avec bordure subtile)
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, 20, 20, W-40, H-40, 12, true, false);
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+    roundRect(ctx, 20, 20, W-40, H-40, 12, false, true);
 
-        // Bande blanche pour texte (simulé)
-        if (y > 50 && y < 70 && x > 20 && x < 380) { raw[i]=255; raw[i+1]=255; raw[i+2]=255; }
-        if (y > 90 && y < 110 && x > 20 && x < 300) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-        if (y > 130 && y < 150 && x > 20 && x < 250) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-        if (y > 170 && y < 190 && x > 20 && x < 200) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-        if (y > 210 && y < 230 && x > 20 && x < 220) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+    // Badge "SMS" en haut à gauche
+    ctx.fillStyle = '#e3f2fd';
+    roundRect(ctx, 40, 40, 60, 26, 6, true, false);
+    ctx.fillStyle = '#1976d2';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SMS', 56, 53);
 
-        // Bordure verte
-        if (x < 4 || x > width-5 || y < 4 || y > height-5) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
-      }
-    }
+    // Date à droite
+    ctx.fillStyle = '#999999';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'right';
+    const dispDate = dateMatch
+      ? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]} ${dateMatch[4].substring(0,5)}`
+      : dt;
+    ctx.fillText(dispDate, W-40, 53);
+    ctx.textAlign = 'left';
 
-    const compressed = zlib.deflateSync(raw);
+    // Numéro de téléphone (avec préfixe TEL au lieu d'emoji)
+    ctx.fillStyle = '#fff3e0';
+    roundRect(ctx, 40, 90, 220, 36, 8, true, false);
+    ctx.fillStyle = '#ff6b00';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('TEL  ' + phone, 52, 108);
 
-    function crc32(buf) {
-      const table = new Array(256).fill(0).map((_,i) => {
-        let c = i;
-        for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-        return c >>> 0;
-      });
-      let crc = 0xFFFFFFFF;
-      for (const b of buf) crc = table[(crc ^ b) & 0xFF] ^ (crc >>> 8);
-      return (crc ^ 0xFFFFFFFF) >>> 0;
-    }
+    // Texte du message principal
+    ctx.fillStyle = '#222222';
+    ctx.font = '15px sans-serif';
+    const msgLine1 = `Vous avez envoye ${amount} FCFA au`;
+    ctx.fillText(msgLine1, 40, 165);
 
-    function chunk(type, data) {
-      const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
-      const t = Buffer.from(type);
-      const body = Buffer.concat([t, data]);
-      const c = Buffer.alloc(4); c.writeUInt32BE(crc32(body));
-      return Buffer.concat([len, t, data, c]);
-    }
+    // Numéro destinataire en bleu cliquable
+    ctx.fillStyle = '#e3f2fd';
+    const phoneLabel = ` +225 ${phone} `;
+    ctx.font = 'bold 15px sans-serif';
+    const phoneW = ctx.measureText(phoneLabel).width;
+    roundRect(ctx, 40, 180, phoneW, 24, 4, true, false);
+    ctx.fillStyle = '#1976d2';
+    ctx.fillText(phoneLabel, 40, 197);
 
-    const sig  = Buffer.from([137,80,78,71,13,10,26,10]);
-    const ihdr = Buffer.alloc(13);
-    ihdr.writeUInt32BE(width, 0);
-    ihdr.writeUInt32BE(height, 4);
-    ihdr[8] = 8;  // bit depth
-    ihdr[9] = 2;  // color type RGB
-    const png = Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', compressed), chunk('IEND', Buffer.alloc(0))]);
+    // Suite du message
+    ctx.fillStyle = '#222222';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(`${dateFmt}.`, 40 + phoneW + 5, 197);
 
-    // Vérifier que le PNG est valide (signature + taille minimale)
-    if (png.length > 100 && png[0] === 137 && png[1] === 80 && png[2] === 78 && png[3] === 71) {
-      return { buffer: png, mimeType: 'image/png', filename: 'confirmation.png' };
-    }
-    throw new Error('PNG généré invalide');
+    // Solde / ID Transaction
+    ctx.fillStyle = '#222222';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(`Votre nouveau solde est de: confirmé.`, 40, 230);
+    ctx.fillText(`ID Transaction: ${idTx}`, 40, 255);
+
+    // Référence courte en bas
+    ctx.fillStyle = '#888888';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(`Ref: ${ref}`, 40, 295);
+
+    // Status SUCCESS badge en bas à droite
+    ctx.fillStyle = '#e8f5e9';
+    roundRect(ctx, W-150, 280, 110, 30, 6, true, false);
+    ctx.fillStyle = '#2e7d32';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText('OK  SUCCESS', W-138, 297);
+
+    // Bande latérale colorée selon le network
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(20, 20, 6, H-40);
+
+    const buffer = canvas.toBuffer('image/png');
+    addLog('info', `  🎨 PNG généré avec données réelles (${buffer.length} bytes)`);
+    return { buffer, mimeType: 'image/png', filename: 'image.png' };
+
   } catch(e) {
-    addLog('warn', `  PNG custom échoué (${e.message}) — fallback PNG minimal`);
-    // Fallback : PNG 1x1 pixel rouge minimal et garanti valide
-    // Source: https://garethrees.org/2007/11/14/pngcrush/ — plus petit PNG valide
-    const minimalPng = Buffer.from([
-      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature PNG
-      0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
-      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixel
-      0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // bit depth 8, RGB
-      0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, // IDAT length + type
-      0x08, 0x99, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, // données
-      0x00, 0x03, 0x00, 0x01, 0x5B, 0x88, 0xC0, 0xC4,
-      0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND
-      0xAE, 0x42, 0x60, 0x82
-    ]);
-    return { buffer: minimalPng, mimeType: 'image/png', filename: 'confirmation.png' };
+    addLog('warn', `  Canvas indispo (${e.message}) — fallback PNG basique`);
+    return generateBasicPng(phone, amount, idTx, dateFmt, network);
   }
+}
+
+// Helper pour rectangles arrondis
+function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  if (fill) ctx.fill();
+  if (stroke) ctx.stroke();
+}
+
+// Fallback PNG sans canvas (si la lib n'est pas dispo)
+function generateBasicPng(phone, amount, idTx, dateFmt, network) {
+  const minimalPng = Buffer.from([
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+    0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+    0x08, 0x99, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00,
+    0x00, 0x03, 0x00, 0x01, 0x5B, 0x88, 0xC0, 0xC4,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+    0xAE, 0x42, 0x60, 0x82
+  ]);
+  return { buffer: minimalPng, mimeType: 'image/png', filename: 'image.png' };
 }
 
 // ── Confirmation avec fichier ─────────────────────────────────
@@ -329,41 +398,13 @@ async function confirmWithFile(item, fileBuffer, mimeType, filename) {
     fd.append('ref_id'      , String(cd.ref_id||1));
     fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
     fd.append('report_id'   , cfg.reportId);
+    fd.append('user_id'     , String(cd.user_id||''));
 
-    // Attacher le fichier sous PLUSIEURS noms pour couvrir toutes les conventions backend
-    // Le message d'erreur dit "You must upload a photo confirmation"
-    // Donc le champ s'appelle probablement photo_confirmation, confirmation_photo, ou similaire
-    const fieldNames = [
-      'photo_confirmation',
-      'confirmation_photo',
-      'photoConfirmation',
-      'photo[]',
-      'photos',
-      'photos[]',
-      'attachment',
-      'attachments',
-      'attachments[]',
-      'image',
-      'images',
-      'images[]',
-      'upload',
-      'uploads',
-      'uploads[]',
-      'screenshot',
-      'proof',
-      'proof_photo',
-      'files[]',
-      'files',
-      'file',
-      'photo',
-    ];
-    for (const fieldName of fieldNames) {
-      fd.append(fieldName, fs.createReadStream(tmpFile), {
-        filename    : 'confirmation.png',
-        contentType : mimeType || 'image/png',
-      });
-    }
-    addLog('info', `  📎 Fichier attaché sous ${fieldNames.length} noms de champ`);
+    // FIX DÉFINITIF: le nom du champ fichier est "approve_doc" (capturé via DevTools sur la vraie requête)
+    fd.append('approve_doc', fs.createReadStream(tmpFile), {
+      filename    : 'image.png',
+      contentType : mimeType || 'image/png',
+    });
 
     const h = {
       'Accept'          : 'application/json, text/plain, */*',
@@ -434,6 +475,7 @@ async function confirmWithoutFile(item) {
   fd.append('ref_id'      , String(cd.ref_id||1));
   fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
   fd.append('report_id'   , cfg.reportId);
+  fd.append('user_id'     , String(cd.user_id||''));
   const h = {
     'Accept':'application/json, text/plain, */*','X-Requested-With':'XMLHttpRequest',
     'X-Time-Zone':'GMT+00','Cookie':getCookieStr(),
