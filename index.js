@@ -55,13 +55,26 @@ function addLog(type, msg) {
 function parseCookies(raw) {
   if (!raw) return '';
   const s = raw.trim();
+  // Format JSON Firefox : [{name, value, ...}]
   if (s.startsWith('[')) {
     try {
       const arr = JSON.parse(s);
-      if (Array.isArray(arr)) return arr.map(c => c.name+'='+c.value).join('; ');
+      if (Array.isArray(arr)) {
+        return arr
+          .filter(c => c.name && c.value !== undefined)
+          .map(c => {
+            const v = String(c.value)
+              .replace(/[\r\n\t]/g, '')
+              .replace(/[^\x20-\x7E]/g, '')
+              .trim();
+            return c.name.trim() + '=' + v;
+          })
+          .join('; ');
+      }
     } catch(e) {}
   }
-  return s;
+  // Format string — nettoyer
+  return s.replace(/[\r\n]/g, '').trim();
 }
 
 function getCookieStr() { return parseCookies(cfg.mgmtCookies); }
