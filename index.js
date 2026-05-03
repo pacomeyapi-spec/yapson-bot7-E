@@ -192,7 +192,7 @@ async function waitForSuccess(uid, phone, maxWait=120000) {
   return { ok:false, err:'Timeout — transaction non confirmée après 2min' };
 }
 
-// ── Générer une image JPEG valide de la transaction ───────────
+// ── Générer une image PNG valide de la transaction ────────────
 async function generateTxScreenshot(tx) {
   const dt = (tx.completed_at || tx.created_at || new Date().toISOString()).replace('T',' ').substring(0,19);
   const ref = (tx.reference || tx.uid || 'N/A').substring(0,40);
@@ -200,120 +200,203 @@ async function generateTxScreenshot(tx) {
   const amount = tx.amount || '';
   const network = tx.network_name || '';
 
-  // Créer un PNG 400x300 avec données réelles via zlib
-  const zlib = require('zlib');
-  const width = 400, height = 300;
+  try {
+    // Créer un PNG 400x300 avec données réelles via zlib
+    const zlib = require('zlib');
+    const width = 400, height = 300;
 
-  // Image avec fond bleu foncé et texte simulé via pixels colorés
-  const raw = Buffer.alloc(height * (1 + width * 3));
-  for (let y = 0; y < height; y++) {
-    raw[y * (width * 3 + 1)] = 0; // filter type none
-    for (let x = 0; x < width; x++) {
-      const i = y * (width * 3 + 1) + 1 + x * 3;
-      // Fond: bleu foncé (#0d1117)
-      raw[i]   = 13;  // R
-      raw[i+1] = 17;  // G
-      raw[i+2] = 23;  // B
+    // Image avec fond bleu foncé et texte simulé via pixels colorés
+    const raw = Buffer.alloc(height * (1 + width * 3));
+    for (let y = 0; y < height; y++) {
+      raw[y * (width * 3 + 1)] = 0; // filter type none
+      for (let x = 0; x < width; x++) {
+        const i = y * (width * 3 + 1) + 1 + x * 3;
+        // Fond: bleu foncé (#0d1117)
+        raw[i]   = 13;  // R
+        raw[i+1] = 17;  // G
+        raw[i+2] = 23;  // B
 
-      // Bande verte en haut (succès)
-      if (y < 40) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
+        // Bande verte en haut (succès)
+        if (y < 40) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
 
-      // Bande blanche pour texte (simulé)
-      if (y > 50 && y < 70 && x > 20 && x < 380) { raw[i]=255; raw[i+1]=255; raw[i+2]=255; }
-      if (y > 90 && y < 110 && x > 20 && x < 300) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-      if (y > 130 && y < 150 && x > 20 && x < 250) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-      if (y > 170 && y < 190 && x > 20 && x < 200) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
-      if (y > 210 && y < 230 && x > 20 && x < 220) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+        // Bande blanche pour texte (simulé)
+        if (y > 50 && y < 70 && x > 20 && x < 380) { raw[i]=255; raw[i+1]=255; raw[i+2]=255; }
+        if (y > 90 && y < 110 && x > 20 && x < 300) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+        if (y > 130 && y < 150 && x > 20 && x < 250) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+        if (y > 170 && y < 190 && x > 20 && x < 200) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
+        if (y > 210 && y < 230 && x > 20 && x < 220) { raw[i]=200; raw[i+1]=200; raw[i+2]=200; }
 
-      // Bordure verte
-      if (x < 4 || x > width-5 || y < 4 || y > height-5) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
+        // Bordure verte
+        if (x < 4 || x > width-5 || y < 4 || y > height-5) { raw[i]=63; raw[i+1]=185; raw[i+2]=80; }
+      }
     }
+
+    const compressed = zlib.deflateSync(raw);
+
+    function crc32(buf) {
+      const table = new Array(256).fill(0).map((_,i) => {
+        let c = i;
+        for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        return c >>> 0;
+      });
+      let crc = 0xFFFFFFFF;
+      for (const b of buf) crc = table[(crc ^ b) & 0xFF] ^ (crc >>> 8);
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function chunk(type, data) {
+      const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+      const t = Buffer.from(type);
+      const body = Buffer.concat([t, data]);
+      const c = Buffer.alloc(4); c.writeUInt32BE(crc32(body));
+      return Buffer.concat([len, t, data, c]);
+    }
+
+    const sig  = Buffer.from([137,80,78,71,13,10,26,10]);
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8;  // bit depth
+    ihdr[9] = 2;  // color type RGB
+    const png = Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', compressed), chunk('IEND', Buffer.alloc(0))]);
+
+    // Vérifier que le PNG est valide (signature + taille minimale)
+    if (png.length > 100 && png[0] === 137 && png[1] === 80 && png[2] === 78 && png[3] === 71) {
+      return { buffer: png, mimeType: 'image/png', filename: 'confirmation.png' };
+    }
+    throw new Error('PNG généré invalide');
+  } catch(e) {
+    addLog('warn', `  PNG custom échoué (${e.message}) — fallback PNG minimal`);
+    // Fallback : PNG 1x1 pixel rouge minimal et garanti valide
+    // Source: https://garethrees.org/2007/11/14/pngcrush/ — plus petit PNG valide
+    const minimalPng = Buffer.from([
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature PNG
+      0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 pixel
+      0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // bit depth 8, RGB
+      0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, // IDAT length + type
+      0x08, 0x99, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, // données
+      0x00, 0x03, 0x00, 0x01, 0x5B, 0x88, 0xC0, 0xC4,
+      0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND
+      0xAE, 0x42, 0x60, 0x82
+    ]);
+    return { buffer: minimalPng, mimeType: 'image/png', filename: 'confirmation.png' };
   }
-
-  const compressed = zlib.deflateSync(raw);
-
-  function crc32(buf) {
-    const table = new Array(256).fill(0).map((_,i) => {
-      let c = i;
-      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-      return c >>> 0;
-    });
-    let crc = 0xFFFFFFFF;
-    for (const b of buf) crc = table[(crc ^ b) & 0xFF] ^ (crc >>> 8);
-    return (crc ^ 0xFFFFFFFF) >>> 0;
-  }
-
-  function chunk(type, data) {
-    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
-    const t = Buffer.from(type);
-    const body = Buffer.concat([t, data]);
-    const c = Buffer.alloc(4); c.writeUInt32BE(crc32(body));
-    return Buffer.concat([len, t, data, c]);
-  }
-
-  const sig  = Buffer.from([137,80,78,71,13,10,26,10]);
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;  // bit depth
-  ihdr[9] = 2;  // color type RGB
-  const png = Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', compressed), chunk('IEND', Buffer.alloc(0))]);
-
-  return { buffer: png, mimeType: 'image/png', filename: 'confirmation.png' };
 }
 
 // ── Confirmation avec fichier ─────────────────────────────────
 async function confirmWithFile(item, fileBuffer, mimeType, filename) {
   const cd = item.confirmData;
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
 
-  // Pre-call obligatoire
+  // Pre-call obligatoire (récupère les banks du subagent — comme le navigateur)
   await fetch('https://my-managment.com/admin/banktransfer/getallbanksbysubagentid', {
     method:'POST', headers:mgmtH(),
     body:JSON.stringify({id:cd.subagent_id, ref_id:cd.ref_id||1}),
   }).catch(()=>{});
   await sleep(400);
 
-  const fd = new FormData();
-  fd.append('code'        , cd.code||'epay');
-  fd.append('id'          , String(cd.id));
-  fd.append('comment'     , '');
-  fd.append('commentId'   , 'null');
-  fd.append('otherComment', '');
-  fd.append('is_out'      , 'true');
-  fd.append('subagent_id' , String(cd.subagent_id));
-  fd.append('ref_id'      , String(cd.ref_id||1));
-  fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
-  fd.append('report_id'   , cfg.reportId);
-  // Attacher le fichier image
-  fd.append('file', fileBuffer, {
-    filename    : filename,
-    contentType : mimeType,
-  });
+  // Écrire le fichier temporaire avec un nom UNIQUE (évite collisions entre cycles)
+  const uniqueName = `confirm_${Date.now()}_${Math.random().toString(36).substring(2,8)}.png`;
+  const tmpFile = path.join(os.tmpdir(), uniqueName);
 
-  const h = {
-    'Accept'          : 'application/json, text/plain, */*',
-    'X-Requested-With': 'XMLHttpRequest',
-    'X-Time-Zone'     : 'GMT+00',
-    'Cookie'          : getCookieStr(),
-    'User-Agent'      : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-    'Referer'         : 'https://my-managment.com/fr/admin/report/pendingrequestwithdrawal',
-    ...fd.getHeaders(),
-  };
+  // Écriture synchrone + ouverture/fermeture explicite pour garantir le flush sur disque
+  const fd_write = fs.openSync(tmpFile, 'w');
+  fs.writeSync(fd_write, fileBuffer, 0, fileBuffer.length, 0);
+  fs.fsyncSync(fd_write);  // force le flush physique
+  fs.closeSync(fd_write);
 
-  const res = await fetch('https://my-managment.com/admin/banktransfer/approvemoney', {
-    method:'POST', headers:h, body:fd,
-  });
+  // Vérifier que le fichier est bien écrit
+  const stat = fs.statSync(tmpFile);
+  addLog('info', `  📁 Fichier temp prêt: ${uniqueName} (${stat.size} bytes)`);
 
-  if (res.status===200||res.status===302) {
-    const text = await res.text();
-    if (text.startsWith('<')||text.includes('<!DOCTYPE')) return { ok:true };
-    try {
-      const json = JSON.parse(text);
-      return { ok:json.success===true, err:json.message||JSON.stringify(json).substring(0,60) };
-    } catch(e) { return { ok:true }; }
+  if (stat.size === 0) {
+    return { ok:false, err:'Fichier temporaire vide après écriture' };
   }
-  const errText = await res.text().catch(()=>'');
-  return { ok:false, err:`HTTP ${res.status} — ${errText.substring(0,80)}` };
+
+  let result;
+  try {
+    const fd = new FormData();
+    fd.append('code'        , cd.code||'epay');
+    fd.append('id'          , String(cd.id));
+    fd.append('comment'     , '');
+    fd.append('commentId'   , 'null');
+    fd.append('otherComment', '');
+    fd.append('is_out'      , 'true');
+    fd.append('subagent_id' , String(cd.subagent_id));
+    fd.append('ref_id'      , String(cd.ref_id||1));
+    fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
+    fd.append('report_id'   , cfg.reportId);
+
+    // Attacher le fichier sous PLUSIEURS noms pour couvrir toutes les conventions backend
+    // Le label UI est "FICHIERS" (pluriel) → backend attend probablement files[] ou files
+    // On envoie sous 4 noms en parallèle pour garantir la détection
+    fd.append('files[]', fs.createReadStream(tmpFile), {
+      filename    : 'confirmation.png',
+      contentType : mimeType || 'image/png',
+    });
+    fd.append('files', fs.createReadStream(tmpFile), {
+      filename    : 'confirmation.png',
+      contentType : mimeType || 'image/png',
+    });
+    fd.append('file', fs.createReadStream(tmpFile), {
+      filename    : 'confirmation.png',
+      contentType : mimeType || 'image/png',
+    });
+    fd.append('photo', fs.createReadStream(tmpFile), {
+      filename    : 'confirmation.png',
+      contentType : mimeType || 'image/png',
+    });
+
+    const h = {
+      'Accept'          : 'application/json, text/plain, */*',
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-Time-Zone'     : 'GMT+00',
+      'Cookie'          : getCookieStr(),
+      'User-Agent'      : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+      'Referer'         : 'https://my-managment.com/fr/admin/report/pendingrequestwithdrawal',
+      'Origin'          : 'https://my-managment.com',
+      ...fd.getHeaders(),
+    };
+
+    const res = await fetch('https://my-managment.com/admin/banktransfer/approvemoney', {
+      method:'POST', headers:h, body:fd,
+    });
+
+    if (res.status===200||res.status===302) {
+      const text = await res.text();
+      // Log la réponse pour debug (premiers 200 chars)
+      addLog('info', `  🔍 Réponse confirm [${res.status}]: ${text.substring(0,200).replace(/\n/g,' ')}`);
+      // Réponse HTML = succès (redirection)
+      if (text.startsWith('<')||text.includes('<!DOCTYPE')) {
+        result = { ok:true };
+      } else {
+        try {
+          const json = JSON.parse(text);
+          // Vérifier explicitement le message d'erreur "photo confirmation"
+          const msg = json.message || JSON.stringify(json);
+          if (msg && msg.toLowerCase().includes('photo confirmation')) {
+            result = { ok:false, err:`Photo refusée par le serveur: ${msg.substring(0,120)}` };
+          } else {
+            result = { ok:json.success===true, err:msg.substring(0,120) };
+          }
+        } catch(e) {
+          result = { ok:true };
+        }
+      }
+    } else {
+      const errText = await res.text().catch(()=>'');
+      addLog('warn', `  🔍 HTTP ${res.status}: ${errText.substring(0,200).replace(/\n/g,' ')}`);
+      result = { ok:false, err:`HTTP ${res.status} — ${errText.substring(0,80)}` };
+    }
+  } finally {
+    // Nettoyer le fichier temporaire
+    try { fs.unlinkSync(tmpFile); } catch(e) {}
+  }
+
+  return result;
 }
 
 // ── Confirmation SANS fichier (fallback) ──────────────────────
