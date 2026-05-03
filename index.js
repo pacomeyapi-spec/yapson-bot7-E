@@ -331,24 +331,39 @@ async function confirmWithFile(item, fileBuffer, mimeType, filename) {
     fd.append('report_id'   , cfg.reportId);
 
     // Attacher le fichier sous PLUSIEURS noms pour couvrir toutes les conventions backend
-    // Le label UI est "FICHIERS" (pluriel) → backend attend probablement files[] ou files
-    // On envoie sous 4 noms en parallèle pour garantir la détection
-    fd.append('files[]', fs.createReadStream(tmpFile), {
-      filename    : 'confirmation.png',
-      contentType : mimeType || 'image/png',
-    });
-    fd.append('files', fs.createReadStream(tmpFile), {
-      filename    : 'confirmation.png',
-      contentType : mimeType || 'image/png',
-    });
-    fd.append('file', fs.createReadStream(tmpFile), {
-      filename    : 'confirmation.png',
-      contentType : mimeType || 'image/png',
-    });
-    fd.append('photo', fs.createReadStream(tmpFile), {
-      filename    : 'confirmation.png',
-      contentType : mimeType || 'image/png',
-    });
+    // Le message d'erreur dit "You must upload a photo confirmation"
+    // Donc le champ s'appelle probablement photo_confirmation, confirmation_photo, ou similaire
+    const fieldNames = [
+      'photo_confirmation',
+      'confirmation_photo',
+      'photoConfirmation',
+      'photo[]',
+      'photos',
+      'photos[]',
+      'attachment',
+      'attachments',
+      'attachments[]',
+      'image',
+      'images',
+      'images[]',
+      'upload',
+      'uploads',
+      'uploads[]',
+      'screenshot',
+      'proof',
+      'proof_photo',
+      'files[]',
+      'files',
+      'file',
+      'photo',
+    ];
+    for (const fieldName of fieldNames) {
+      fd.append(fieldName, fs.createReadStream(tmpFile), {
+        filename    : 'confirmation.png',
+        contentType : mimeType || 'image/png',
+      });
+    }
+    addLog('info', `  📎 Fichier attaché sous ${fieldNames.length} noms de champ`);
 
     const h = {
       'Accept'          : 'application/json, text/plain, */*',
