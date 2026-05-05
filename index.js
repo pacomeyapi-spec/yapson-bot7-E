@@ -2,46 +2,44 @@
 // YAPSON-BOT7-E — Multi-fournisseurs avec capture d'écran
 // Logique: fournisseur par fournisseur, réseau auto-détecté
 // Confirmation avec fichier image obligatoire
+// FIX: génération PNG via SVG+sharp (plus de dépendance @napi-rs/canvas)
 // ============================================================
-
 const express  = require('express');
 const fetch    = require('node-fetch');
 const FormData = require('form-data');
-
 const app  = express();
 const PORT = process.env.PORT || 8080;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── Mapping réseau ────────────────────────────────────────────
+// ── Mapping réseau ──────────────────────────────────────────────
 const NET_UUIDS = {
-  'MOOV CI'  : '24462fd9-c8e2-42f2-a95f-119844bc2ada',
-  'MTN CI'   : '77e8e729-a0f1-4e1b-8614-168c77f4b101',
+  'MOOV CI' : '24462fd9-c8e2-42f2-a95f-119844bc2ada',
+  'MTN CI'  : '77e8e729-a0f1-4e1b-8614-168c77f4b101',
   'ORANGE CI': '938988bf-d571-4eac-befb-40644c20976a',
   'Orangeint': '6fbc14c6-2b0b-431a-afce-2c371b33b2a3',
-  'Wave'     : '97847ae3-6c50-4116-a6da-a69695afbaaa',
+  'Wave'    : '97847ae3-6c50-4116-a6da-a69695afbaaa',
 };
 
-// Détecte le réseau yapson depuis le titre my-managment
 function detectNetwork(title) {
   const t = (title || '').toLowerCase();
   if (t.includes('wave'))   return 'Wave';
   if (t.includes('mtn'))    return 'MTN CI';
   if (t.includes('moov'))   return 'MOOV CI';
   if (t.includes('orange')) return 'Orangeint';
-  return 'Orangeint'; // fallback
+  return 'Orangeint';
 }
 
-// ── Config ────────────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────────────
 let cfg = {
-  mgmtCookies  : process.env.MGMT_COOKIES   || '',
-  yapsonToken  : process.env.YAPSON_TOKEN   || '',
-  reportId     : process.env.REPORT_ID      || '8231c3be3216307da83c067d263c09ec',
+  mgmtCookies  : process.env.MGMT_COOKIES  || '',
+  yapsonToken  : process.env.YAPSON_TOKEN  || '',
+  reportId     : process.env.REPORT_ID     || '8231c3be3216307da83c067d263c09ec',
   pollInterval : parseInt(process.env.POLL_INTERVAL || '900'),
-  maxSolde     : parseInt(process.env.MAX_SOLDE || '0'),
+  maxSolde     : parseInt(process.env.MAX_SOLDE     || '0'),
 };
 
-const stats = { confirmed: 0, missing: 0, fixed: 0, polls: 0, rejected: 0 };
+const stats = { confirmed:0, missing:0, fixed:0, polls:0, rejected:0 };
 const logs  = [];
 let pollTimer = null, isRunning = false, botActive = false;
 
@@ -55,7 +53,6 @@ function addLog(type, msg) {
 function parseCookies(raw) {
   if (!raw) return '';
   const s = raw.trim();
-  // Format JSON Firefox : [{name, value, ...}]
   if (s.startsWith('[')) {
     try {
       const arr = JSON.parse(s);
@@ -64,8 +61,8 @@ function parseCookies(raw) {
           .filter(c => c.name && c.value !== undefined)
           .map(c => {
             const v = String(c.value)
-              .replace(/[\r\n\t]/g, '')
-              .replace(/[^\x20-\x7E]/g, '')
+              .replace(/[\r\n\t]/g,'')
+              .replace(/[^\x20-\x7E]/g,'')
               .trim();
             return c.name.trim() + '=' + v;
           })
@@ -73,67 +70,62 @@ function parseCookies(raw) {
       }
     } catch(e) {}
   }
-  // Format string — nettoyer
-  return s.replace(/[\r\n]/g, '').trim();
+  return s.replace(/[\r\n]/g,'').trim();
 }
 
 function getCookieStr() { return parseCookies(cfg.mgmtCookies); }
 
 function mgmtH() {
   return {
-    'Accept'           : 'application/json, text/plain, */*',
-    'Content-Type'     : 'application/json',
-    'X-Requested-With' : 'XMLHttpRequest',
-    'X-Time-Zone'      : 'GMT+00',
-    'Cookie'           : getCookieStr(),
-    'User-Agent'       : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-    'Referer'          : 'https://my-managment.com/fr/admin/report/pendingrequestwithdrawal',
+    'Accept'          : 'application/json, text/plain, */*',
+    'Content-Type'    : 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-Time-Zone'     : 'GMT+00',
+    'Cookie'          : getCookieStr(),
+    'User-Agent'      : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+    'Referer'         : 'https://my-managment.com/fr/admin/report/pendingrequestwithdrawal',
   };
 }
+
 function yapH() {
-  return { 'Content-Type':'application/json', 'Authorization': `Bearer ${cfg.yapsonToken}` };
+  return {
+    'Content-Type' : 'application/json',
+    'Authorization': `Bearer ${cfg.yapsonToken}`,
+  };
 }
 
-// ── Lire TOUS les retraits et grouper par fournisseur ─────────
+// ── Lire TOUS les retraits et grouper par fournisseur ───────────
 async function getAllWithdrawals() {
   const res = await fetch('https://my-managment.com/admin/report/pendingrequestwithdrawal', {
-    method:'POST', headers:mgmtH(), body:JSON.stringify({page:1,limit:500}),
+    method:'POST', headers:mgmtH(),
+    body:JSON.stringify({page:1,limit:500}),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} — cookies expirés ?`);
   const data = await res.json();
   if (data.is_guest) throw new Error('Session expirée — injecter nouveaux cookies');
   const rows = data.data || [];
 
-  // Grouper par subagent_id (fournisseur)
   const groups = {};
   for (const row of rows) {
-    const montant = row.summa_sort || parseInt((row.summa||'').replace(/[^0-9]/g,''))||0;
-    const phone   = row.dopparam?.[0]?.description || '';
-    const netTitle= row.dopparam?.[0]?.title || '';
-    const pm      = String(phone).match(/0[0-9]{9}/);
-    const cd      = row.confirm?.[0]?.data || null;
-    const sid     = cd?.subagent_id;
-    const filesRequired = cd?.files_required || 0;
-    const subagentName  = row.subagent || `Fournisseur_${sid}`;
-
+    const montant  = row.summa_sort || parseInt((row.summa||'').replace(/[^0-9]/g,''))||0;
+    const phone    = row.dopparam?.[0]?.description || '';
+    const netTitle = row.dopparam?.[0]?.title       || '';
+    const pm       = String(phone).match(/0[0-9]{9}/);
+    const cd       = row.confirm?.[0]?.data || null;
+    const sid      = cd?.subagent_id;
+    const filesRequired  = cd?.files_required || 0;
+    const subagentName   = row.subagent || `Fournisseur_${sid}`;
     if (!pm || montant <= 0 || !cd || !sid) continue;
-
     if (!groups[sid]) {
-      groups[sid] = {
-        subagent_id  : sid,
-        subagentName : subagentName,
-        netTitle     : netTitle,
-        network      : detectNetwork(netTitle),
-        filesRequired: filesRequired,
-        items        : [],
-      };
+      groups[sid] = { subagent_id:sid, subagentName, netTitle,
+        network:detectNetwork(netTitle), filesRequired, items:[] };
     }
     groups[sid].items.push({ phone:pm[0], montant, confirmData:cd, netTitle });
   }
   return groups;
 }
 
-// ── Décaissement yapson ───────────────────────────────────────
+// ── Décaissement yapson ─────────────────────────────────────────
 async function payout(item, network) {
   const uuid = NET_UUIDS[network] || NET_UUIDS['Orangeint'];
   const res  = await fetch('https://connect.yapson.net/api/aggregator/payout/', {
@@ -141,249 +133,189 @@ async function payout(item, network) {
     body:JSON.stringify({ amount:item.montant, recipient_phone:item.phone, network:uuid }),
   });
   const body = await res.json().catch(()=>({}));
-  // Log la réponse complète pour debug
-  addLog('info', `  🔍 Payout réponse [${res.status}]: ${JSON.stringify(body).substring(0,120)}`);
+  addLog('info', ` 🔍 Payout réponse [${res.status}]: ${JSON.stringify(body).substring(0,120)}`);
   if (res.status===200||res.status===201) {
     const uid = body.uid || body.id || body.reference || null;
-    return { ok:true, uid, phone: item.phone, montant: item.montant };
+    return { ok:true, uid, phone:item.phone, montant:item.montant };
   }
   return { ok:false, err:JSON.stringify(body).substring(0,100) };
 }
 
-// ── Attendre que la transaction passe en SUCCESS ──────────────
+// ── Attendre que la transaction passe en SUCCESS ────────────────
 async function waitForSuccess(uid, phone, maxWait=120000) {
   const start = Date.now();
   while (Date.now() - start < maxWait) {
     await sleep(5000);
     try {
-      let tx = null;
-      // Normaliser le numéro: 0XXXXXXXXX <-> 225XXXXXXXXX
       function normalizePhone(p) {
         const s = String(p).replace(/[^0-9]/g,'');
-        if (s.startsWith('225')) return s.substring(3); // 2250XXXXXXXX -> 0XXXXXXXX
-        if (s.startsWith('0') && s.length === 10) return s; // 0XXXXXXXX ok
+        if (s.startsWith('225')) return s.substring(3);
+        if (s.startsWith('0') && s.length === 10) return s;
         return s;
       }
       const phoneNorm = normalizePhone(phone);
-      // Si uid connu: appel direct
+      let tx = null;
       if (uid) {
-        const res = await fetch(`https://connect.yapson.net/api/aggregator/transactions/${uid}/`, {
-          headers: yapH(),
-        });
+        const res = await fetch(`https://connect.yapson.net/api/aggregator/transactions/${uid}/`, { headers:yapH() });
         tx = await res.json();
       } else {
-        // Chercher par téléphone dans les 50 dernières transactions
-        const res = await fetch('https://connect.yapson.net/api/aggregator/transactions/?limit=50', {
-          headers: yapH(),
-        });
+        const res  = await fetch('https://connect.yapson.net/api/aggregator/transactions/?limit=50', { headers:yapH() });
         const data = await res.json();
         const results = data.results || data.data || [];
         tx = results.find(t => {
           const tNorm = normalizePhone(t.recipient_phone);
-          return tNorm === phoneNorm && (t.status === 'pending' || t.status === 'success');
+          return tNorm === phoneNorm && (t.status==='pending'||t.status==='success');
         });
       }
-      if (!tx) { addLog('info', `⏳ Transaction introuvable pour ${phone} (${phoneNorm})...`); continue; }
-      if (tx.status === 'success') return { ok:true, tx };
-      if (tx.status === 'failed')  return { ok:false, err:`Transaction échouée: ${tx.error_message||''}` };
-      addLog('info', `⏳ ${(tx.uid||phone).substring(0,8)} status=${tx.status}...`);
-    } catch(e) { addLog('info', `⏳ attente...`); }
+      if (!tx) { addLog('info',`⏳ Transaction introuvable pour ${phone}...`); continue; }
+      if (tx.status==='success') return { ok:true, tx };
+      if (tx.status==='failed')  return { ok:false, err:`Transaction échouée: ${tx.error_message||''}` };
+      addLog('info',`⏳ ${(tx.uid||phone).substring(0,8)} status=${tx.status}...`);
+    } catch(e) { addLog('info',`⏳ attente...`); }
   }
   return { ok:false, err:'Timeout — transaction non confirmée après 2min' };
 }
 
-// ── Générer une capture SMS-like avec @napi-rs/canvas ─────────
+// ── Générer PNG via SVG + sharp (aucune dépendance native fragile) ──
 async function generateTxScreenshot(tx) {
-  const dt = (tx.completed_at || tx.created_at || new Date().toISOString())
-    .replace('T',' ').substring(0,19);
-  const ref = tx.reference || tx.uid || 'N/A';
-  const phone = tx.recipient_phone || '';
-  const amount = parseInt(tx.amount || 0).toLocaleString('fr-FR');
+  const dt      = (tx.completed_at || tx.created_at || new Date().toISOString())
+                    .replace('T',' ').substring(0,19);
+  const ref     = tx.reference || tx.uid || 'N/A';
+  const phone   = tx.recipient_phone || '';
+  const amount  = parseInt(tx.amount || 0).toLocaleString('fr-FR');
   const network = (tx.network_name || tx.network || '').toUpperCase();
 
-  // Formatter la date au format SMS local: "le 03-05-2026 10:41:14"
   const dateMatch = dt.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})/);
-  const dateFmt = dateMatch
+  const dateFmt   = dateMatch
     ? `le ${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]} ${dateMatch[4]}`
     : dt;
-
-  // ID transaction court (10 derniers chars de la ref)
+  const dispDate  = dateMatch
+    ? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]} ${dateMatch[4].substring(0,5)}`
+    : dt;
   const idTx = String(ref).replace(/[^0-9A-Z]/gi,'').slice(-10).toUpperCase();
 
-  // Couleurs en fonction du network
   const netColors = {
-    'WAVE'    : { bg:'#1e88ff', accent:'#1e88ff' },
-    'ORANGE'  : { bg:'#ff6b00', accent:'#ff6b00' },
-    'MTN'     : { bg:'#ffd700', accent:'#000000' },
-    'MOOV'    : { bg:'#0088cc', accent:'#0088cc' },
-    'ORANGEINT': { bg:'#ff6b00', accent:'#ff6b00' },
-    'MTN CI'  : { bg:'#ffd700', accent:'#000000' },
-    'MOOV CI' : { bg:'#0088cc', accent:'#0088cc' },
+    'WAVE'     : '#1e88ff',
+    'ORANGE'   : '#ff6b00',
+    'ORANGEINT': '#ff6b00',
+    'MTN'      : '#ffd700',
+    'MTN CI'   : '#ffd700',
+    'MOOV'     : '#0088cc',
+    'MOOV CI'  : '#0088cc',
   };
-  let netKey = network;
+  let accent = '#1e88ff';
   for (const k of Object.keys(netColors)) {
-    if (network.includes(k.split(' ')[0])) { netKey = k; break; }
+    if (network.includes(k.split(' ')[0])) { accent = netColors[k]; break; }
   }
-  const colors = netColors[netKey] || { bg:'#1e88ff', accent:'#1e88ff' };
+
+  // Échapper les caractères spéciaux XML
+  const esc = s => String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+
+  const svg = `<svg width="600" height="360" xmlns="http://www.w3.org/2000/svg">
+  <rect width="600" height="360" fill="#f5f5f7"/>
+  <rect x="20" y="20" width="560" height="320" rx="12" ry="12" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+  <rect x="20" y="20" width="6" height="320" rx="3" fill="${accent}"/>
+
+  <rect x="40" y="40" width="60" height="26" rx="6" fill="#e3f2fd"/>
+  <text x="70" y="58" font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="#1976d2" text-anchor="middle">SMS</text>
+
+  <text x="560" y="58" font-family="Arial,sans-serif" font-size="12" fill="#999999" text-anchor="end">${esc(dispDate)}</text>
+
+  <rect x="40" y="83" width="240" height="36" rx="8" fill="#fff3e0"/>
+  <text x="52" y="107" font-family="Arial,sans-serif" font-size="17" font-weight="bold" fill="#ff6b00">TEL ${esc(phone)}</text>
+
+  <text x="40" y="158" font-family="Arial,sans-serif" font-size="15" fill="#222222">Vous avez envoye ${esc(amount)} FCFA au</text>
+
+  <rect x="40" y="166" width="235" height="24" rx="4" fill="#e3f2fd"/>
+  <text x="44" y="183" font-family="Arial,sans-serif" font-size="14" font-weight="bold" fill="#1976d2">+225 ${esc(phone)}</text>
+  <text x="283" y="183" font-family="Arial,sans-serif" font-size="14" fill="#222222">${esc(dateFmt)}.</text>
+
+  <text x="40" y="222" font-family="Arial,sans-serif" font-size="15" fill="#222222">Votre nouveau solde est de: confirme.</text>
+  <text x="40" y="250" font-family="Arial,sans-serif" font-size="15" fill="#222222">ID Transaction: ${esc(idTx)}</text>
+
+  <text x="40" y="293" font-family="Arial,sans-serif" font-size="11" fill="#888888">Ref: ${esc(ref)}</text>
+
+  <rect x="448" y="277" width="112" height="30" rx="6" fill="#e8f5e9"/>
+  <text x="504" y="297" font-family="Arial,sans-serif" font-size="12" font-weight="bold" fill="#2e7d32" text-anchor="middle">OK SUCCESS</text>
+</svg>`;
 
   try {
-    const { createCanvas } = require('@napi-rs/canvas');
-    const W = 600, H = 360;
-    const canvas = createCanvas(W, H);
-    const ctx = canvas.getContext('2d');
-
-    // Fond gris clair (style messagerie)
-    ctx.fillStyle = '#f5f5f7';
-    ctx.fillRect(0, 0, W, H);
-
-    // Carte SMS arrondie (rectangle blanc avec bordure subtile)
-    ctx.fillStyle = '#ffffff';
-    roundRect(ctx, 20, 20, W-40, H-40, 12, true, false);
-    ctx.strokeStyle = '#e0e0e0';
-    ctx.lineWidth = 1;
-    roundRect(ctx, 20, 20, W-40, H-40, 12, false, true);
-
-    // Badge "SMS" en haut à gauche
-    ctx.fillStyle = '#e3f2fd';
-    roundRect(ctx, 40, 40, 60, 26, 6, true, false);
-    ctx.fillStyle = '#1976d2';
-    ctx.font = 'bold 13px sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('SMS', 56, 53);
-
-    // Date à droite
-    ctx.fillStyle = '#999999';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'right';
-    const dispDate = dateMatch
-      ? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]} ${dateMatch[4].substring(0,5)}`
-      : dt;
-    ctx.fillText(dispDate, W-40, 53);
-    ctx.textAlign = 'left';
-
-    // Numéro de téléphone (avec préfixe TEL au lieu d'emoji)
-    ctx.fillStyle = '#fff3e0';
-    roundRect(ctx, 40, 90, 220, 36, 8, true, false);
-    ctx.fillStyle = '#ff6b00';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillText('TEL  ' + phone, 52, 108);
-
-    // Texte du message principal
-    ctx.fillStyle = '#222222';
-    ctx.font = '15px sans-serif';
-    const msgLine1 = `Vous avez envoye ${amount} FCFA au`;
-    ctx.fillText(msgLine1, 40, 165);
-
-    // Numéro destinataire en bleu cliquable
-    ctx.fillStyle = '#e3f2fd';
-    const phoneLabel = ` +225 ${phone} `;
-    ctx.font = 'bold 15px sans-serif';
-    const phoneW = ctx.measureText(phoneLabel).width;
-    roundRect(ctx, 40, 180, phoneW, 24, 4, true, false);
-    ctx.fillStyle = '#1976d2';
-    ctx.fillText(phoneLabel, 40, 197);
-
-    // Suite du message
-    ctx.fillStyle = '#222222';
-    ctx.font = '15px sans-serif';
-    ctx.fillText(`${dateFmt}.`, 40 + phoneW + 5, 197);
-
-    // Solde / ID Transaction
-    ctx.fillStyle = '#222222';
-    ctx.font = '15px sans-serif';
-    ctx.fillText(`Votre nouveau solde est de: confirmé.`, 40, 230);
-    ctx.fillText(`ID Transaction: ${idTx}`, 40, 255);
-
-    // Référence courte en bas
-    ctx.fillStyle = '#888888';
-    ctx.font = '11px sans-serif';
-    ctx.fillText(`Ref: ${ref}`, 40, 295);
-
-    // Status SUCCESS badge en bas à droite
-    ctx.fillStyle = '#e8f5e9';
-    roundRect(ctx, W-150, 280, 110, 30, 6, true, false);
-    ctx.fillStyle = '#2e7d32';
-    ctx.font = 'bold 12px sans-serif';
-    ctx.fillText('OK  SUCCESS', W-138, 297);
-
-    // Bande latérale colorée selon le network
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(20, 20, 6, H-40);
-
-    const buffer = canvas.toBuffer('image/png');
-    addLog('info', `  🎨 PNG généré avec données réelles (${buffer.length} bytes)`);
-    return { buffer, mimeType: 'image/png', filename: 'image.png' };
-
+    const sharp  = require('sharp');
+    const buffer = await sharp(Buffer.from(svg)).png().toBuffer();
+    addLog('info', ` 🎨 PNG généré via SVG+sharp (${buffer.length} bytes)`);
+    return { buffer, mimeType:'image/png', filename:'image.png' };
   } catch(e) {
-    addLog('warn', `  Canvas indispo (${e.message}) — fallback PNG basique`);
-    return generateBasicPng(phone, amount, idTx, dateFmt, network);
+    addLog('warn', ` Sharp indispo (${e.message}) — fallback SVG direct`);
+    return generateBasicPng(phone, amount, idTx, dateFmt, network, svg);
   }
 }
 
-// Helper pour rectangles arrondis
+// ── Fallback : retourner le SVG brut si sharp absent ────────────
+function generateBasicPng(phone, amount, idTx, dateFmt, network, svgContent) {
+  // Certains serveurs acceptent image/svg+xml comme "fichier image"
+  // Si ça ne passe pas, l'admin verra l'erreur dans les logs et pourra installer sharp
+  if (svgContent) {
+    addLog('warn', ` ⚠ Envoi SVG (sharp absent) — installer sharp dans package.json`);
+    return {
+      buffer   : Buffer.from(svgContent),
+      mimeType : 'image/svg+xml',
+      filename : 'image.svg',
+    };
+  }
+  addLog('err', ` ❌ Aucun moteur PNG — sharp manquant dans package.json`);
+  const minimalPng = Buffer.from([
+    0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,
+    0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
+    0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
+    0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,0xDE,
+    0x00,0x00,0x00,0x0C,0x49,0x44,0x41,0x54,
+    0x08,0x99,0x63,0xF8,0xCF,0xC0,0x00,0x00,
+    0x00,0x03,0x00,0x01,0x5B,0x88,0xC0,0xC4,
+    0x00,0x00,0x00,0x00,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82,
+  ]);
+  return { buffer:minimalPng, mimeType:'image/png', filename:'image.png' };
+}
+
+// Helper rectangles arrondis (conservé pour compatibilité, non utilisé avec SVG)
 function roundRect(ctx, x, y, w, h, r, fill, stroke) {
   ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-  if (fill) ctx.fill();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r);
+  ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h);
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r);
+  ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+  if (fill)   ctx.fill();
   if (stroke) ctx.stroke();
 }
 
-// Fallback PNG sans canvas (si la lib n'est pas dispo)
-function generateBasicPng(phone, amount, idTx, dateFmt, network) {
-  const minimalPng = Buffer.from([
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
-    0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
-    0x08, 0x99, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00,
-    0x00, 0x03, 0x00, 0x01, 0x5B, 0x88, 0xC0, 0xC4,
-    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
-    0xAE, 0x42, 0x60, 0x82
-  ]);
-  return { buffer: minimalPng, mimeType: 'image/png', filename: 'image.png' };
-}
-
-// ── Confirmation avec fichier ─────────────────────────────────
+// ── Confirmation avec fichier ────────────────────────────────────
 async function confirmWithFile(item, fileBuffer, mimeType, filename) {
   const cd = item.confirmData;
-  const fs = require('fs');
-  const os = require('os');
+  const fs   = require('fs');
+  const os   = require('os');
   const path = require('path');
 
-  // Pre-call obligatoire (récupère les banks du subagent — comme le navigateur)
   await fetch('https://my-managment.com/admin/banktransfer/getallbanksbysubagentid', {
     method:'POST', headers:mgmtH(),
     body:JSON.stringify({id:cd.subagent_id, ref_id:cd.ref_id||1}),
   }).catch(()=>{});
   await sleep(400);
 
-  // Écrire le fichier temporaire avec un nom UNIQUE (évite collisions entre cycles)
   const uniqueName = `confirm_${Date.now()}_${Math.random().toString(36).substring(2,8)}.png`;
-  const tmpFile = path.join(os.tmpdir(), uniqueName);
+  const tmpFile    = path.join(os.tmpdir(), uniqueName);
 
-  // Écriture synchrone + ouverture/fermeture explicite pour garantir le flush sur disque
-  const fd_write = fs.openSync(tmpFile, 'w');
+  const fd_write = fs.openSync(tmpFile,'w');
   fs.writeSync(fd_write, fileBuffer, 0, fileBuffer.length, 0);
-  fs.fsyncSync(fd_write);  // force le flush physique
+  fs.fsyncSync(fd_write);
   fs.closeSync(fd_write);
 
-  // Vérifier que le fichier est bien écrit
   const stat = fs.statSync(tmpFile);
-  addLog('info', `  📁 Fichier temp prêt: ${uniqueName} (${stat.size} bytes)`);
-
-  if (stat.size === 0) {
-    return { ok:false, err:'Fichier temporaire vide après écriture' };
-  }
+  addLog('info', ` 📁 Fichier temp prêt: ${uniqueName} (${stat.size} bytes)`);
+  if (stat.size === 0) return { ok:false, err:'Fichier temporaire vide après écriture' };
 
   let result;
   try {
@@ -399,11 +331,9 @@ async function confirmWithFile(item, fileBuffer, mimeType, filename) {
     fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
     fd.append('report_id'   , cfg.reportId);
     fd.append('user_id'     , String(cd.user_id||''));
-
-    // FIX DÉFINITIF: le nom du champ fichier est "approve_doc" (capturé via DevTools sur la vraie requête)
-    fd.append('approve_doc', fs.createReadStream(tmpFile), {
-      filename    : 'image.png',
-      contentType : mimeType || 'image/png',
+    fd.append('approve_doc' , fs.createReadStream(tmpFile), {
+      filename   : 'image.png',
+      contentType: mimeType || 'image/png',
     });
 
     const h = {
@@ -423,39 +353,32 @@ async function confirmWithFile(item, fileBuffer, mimeType, filename) {
 
     if (res.status===200||res.status===302) {
       const text = await res.text();
-      // Log la réponse pour debug (premiers 200 chars)
-      addLog('info', `  🔍 Réponse confirm [${res.status}]: ${text.substring(0,200).replace(/\n/g,' ')}`);
-      // Réponse HTML = succès (redirection)
+      addLog('info', ` 🔍 Réponse confirm [${res.status}]: ${text.substring(0,200).replace(/\n/g,' ')}`);
       if (text.startsWith('<')||text.includes('<!DOCTYPE')) {
         result = { ok:true };
       } else {
         try {
           const json = JSON.parse(text);
-          // Vérifier explicitement le message d'erreur "photo confirmation"
-          const msg = json.message || JSON.stringify(json);
+          const msg  = json.message || JSON.stringify(json);
           if (msg && msg.toLowerCase().includes('photo confirmation')) {
-            result = { ok:false, err:`Photo refusée par le serveur: ${msg.substring(0,120)}` };
+            result = { ok:false, err:`Photo refusée: ${msg.substring(0,120)}` };
           } else {
             result = { ok:json.success===true, err:msg.substring(0,120) };
           }
-        } catch(e) {
-          result = { ok:true };
-        }
+        } catch(e) { result = { ok:true }; }
       }
     } else {
       const errText = await res.text().catch(()=>'');
-      addLog('warn', `  🔍 HTTP ${res.status}: ${errText.substring(0,200).replace(/\n/g,' ')}`);
+      addLog('warn', ` 🔍 HTTP ${res.status}: ${errText.substring(0,200).replace(/\n/g,' ')}`);
       result = { ok:false, err:`HTTP ${res.status} — ${errText.substring(0,80)}` };
     }
   } finally {
-    // Nettoyer le fichier temporaire
-    try { fs.unlinkSync(tmpFile); } catch(e) {}
+    try { require('fs').unlinkSync(tmpFile); } catch(e) {}
   }
-
   return result;
 }
 
-// ── Confirmation SANS fichier (fallback) ──────────────────────
+// ── Confirmation SANS fichier (fallback) ─────────────────────────
 async function confirmWithoutFile(item) {
   const cd = item.confirmData;
   await fetch('https://my-managment.com/admin/banktransfer/getallbanksbysubagentid', {
@@ -476,6 +399,7 @@ async function confirmWithoutFile(item) {
   fd.append('bank_id'     , cd.bank_id ? String(cd.bank_id) : 'null');
   fd.append('report_id'   , cfg.reportId);
   fd.append('user_id'     , String(cd.user_id||''));
+
   const h = {
     'Accept':'application/json, text/plain, */*','X-Requested-With':'XMLHttpRequest',
     'X-Time-Zone':'GMT+00','Cookie':getCookieStr(),
@@ -483,6 +407,7 @@ async function confirmWithoutFile(item) {
     'Referer':'https://my-managment.com/fr/admin/report/pendingrequestwithdrawal',
     ...fd.getHeaders(),
   };
+
   const res = await fetch('https://my-managment.com/admin/banktransfer/approvemoney', {
     method:'POST', headers:h, body:fd,
   });
@@ -498,113 +423,109 @@ async function confirmWithoutFile(item) {
 
 function sleep(ms) { return new Promise(r=>setTimeout(r,ms)); }
 
-// ── Cycle principal ───────────────────────────────────────────
+// ── Cycle principal ──────────────────────────────────────────────
 async function runCycle() {
   if (isRunning) return;
-  isRunning = true; stats.polls++;
-  addLog('info', `━━ Poll #${stats.polls} ━━`);
+  isRunning = true;
+  stats.polls++;
+  addLog('info',`━━ Poll #${stats.polls} ━━`);
   try {
-    if (!getCookieStr()) throw new Error('Cookies manquants — injecter via le dashboard');
-    if (!cfg.yapsonToken) throw new Error('YAPSON_TOKEN manquant');
+    if (!getCookieStr())   throw new Error('Cookies manquants — injecter via le dashboard');
+    if (!cfg.yapsonToken)  throw new Error('YAPSON_TOKEN manquant');
 
-    const groups = await getAllWithdrawals();
+    const groups    = await getAllWithdrawals();
     const groupList = Object.values(groups);
-
     if (!groupList.length) {
-      addLog('info', 'Poll: 0 retrait en attente');
+      addLog('info','Poll: 0 retrait en attente');
       isRunning = false; return;
     }
 
-    addLog('info', `${groupList.length} fournisseur(s) — ${groupList.map(g=>`${g.subagentName.substring(0,20)}(${g.items.length})`).join(', ')}`);
+    addLog('info',`${groupList.length} fournisseur(s) — ${groupList.map(g=>`${g.subagentName.substring(0,20)}(${g.items.length})`).join(', ')}`);
 
-    // Traiter fournisseur par fournisseur
     for (const group of groupList) {
       const { subagentName, network, filesRequired, items } = group;
-      addLog('info', `▶ Fournisseur: ${subagentName} | Réseau: ${network} | ${items.length} retrait(s) | Fichier: ${filesRequired?'OUI':'NON'}`);
+      addLog('info',`▶ Fournisseur: ${subagentName} | Réseau: ${network} | ${items.length} retrait(s) | Fichier: ${filesRequired?'OUI':'NON'}`);
 
       for (const item of items) {
-        addLog('info', `  → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${network}]`);
+        addLog('info',` → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${network}]`);
 
-        // 1. Décaisser
         const payResult = await payout(item, network);
         if (!payResult.ok) {
           stats.missing++;
-          addLog('err', `  ✘ Décaissement échoué: ${item.phone} — ${payResult.err}`);
-          await sleep(800);
-          continue;
+          addLog('err',` ✘ Décaissement échoué: ${item.phone} — ${payResult.err}`);
+          await sleep(800); continue;
         }
-        addLog('ok', `  ✔ Décaissé: ${item.phone} → ${item.montant.toLocaleString()} FCFA (uid: ${payResult.uid?.substring(0,8)}...)`);
+        addLog('ok',` ✔ Décaissé: ${item.phone} → ${item.montant.toLocaleString()} FCFA (uid: ${payResult.uid?.substring(0,8)}...)`);
 
-        // 2. Si fichier requis: attendre SUCCESS + screenshot
-        if (filesRequired) {  // Toujours attendre si fichier requis
-          addLog('info', `  ⏳ Attente confirmation yapson pour ${item.phone} (uid: ${(payResult.uid||'?').substring(0,8)})...`);
+        if (filesRequired) {
+          addLog('info',` ⏳ Attente confirmation yapson pour ${item.phone} (uid: ${(payResult.uid||'?').substring(0,8)})...`);
           const waitResult = await waitForSuccess(payResult.uid, item.phone);
-
           if (!waitResult.ok) {
             stats.missing++;
-            addLog('warn', `  ⚠ ${item.phone} — ${waitResult.err} — confirmation manuelle requise`);
-            await sleep(800);
-            continue;
+            addLog('warn',` ⚠ ${item.phone} — ${waitResult.err} — confirmation manuelle requise`);
+            await sleep(800); continue;
           }
+          addLog('ok',` ✔ Transaction SUCCESS: ${waitResult.tx?.uid?.substring(0,8)||'?'}`);
 
-          addLog('ok', `  ✔ Transaction SUCCESS: ${waitResult.tx?.uid?.substring(0,8)||'?'}`);
-
-          // Générer screenshot PNG de la transaction
           const screenshot = await generateTxScreenshot(waitResult.tx);
-          addLog('info', `  📸 PNG ${screenshot.buffer.length} bytes`);
+          addLog('info',` 📸 PNG ${screenshot.buffer.length} bytes`);
 
-          // Confirmer avec fichier
           const confirmResult = await confirmWithFile(item, screenshot.buffer, screenshot.mimeType, screenshot.filename);
           if (confirmResult.ok) {
             stats.confirmed++;
-            addLog('ok', `  ✔ Confirmé avec fichier: ${item.phone}`);
+            addLog('ok',` ✔ Confirmé avec fichier: ${item.phone}`);
           } else {
             stats.missing++;
-            addLog('warn', `  ⚠ Confirmation échouée: ${item.phone} — ${confirmResult.err}`);
+            addLog('warn',` ⚠ Confirmation échouée: ${item.phone} — ${confirmResult.err}`);
           }
         } else {
-          // Pas de fichier requis: confirmer directement
           await sleep(1000);
           const confirmResult = await confirmWithoutFile(item);
           if (confirmResult.ok) {
             stats.confirmed++;
-            addLog('ok', `  ✔ Confirmé: ${item.phone}`);
+            addLog('ok',` ✔ Confirmé: ${item.phone}`);
           } else {
             stats.missing++;
-            addLog('warn', `  ⚠ Manuel: ${item.phone} — ${confirmResult.err}`);
+            addLog('warn',` ⚠ Manuel: ${item.phone} — ${confirmResult.err}`);
           }
         }
         await sleep(700);
       }
-
-      addLog('info', `✓ Fournisseur ${subagentName.substring(0,20)} terminé`);
+      addLog('info',`✓ Fournisseur ${subagentName.substring(0,20)} terminé`);
       await sleep(1000);
     }
-
-    addLog('info', `Poll terminé — ${stats.confirmed} confirmés total`);
+    addLog('info',`Poll terminé — ${stats.confirmed} confirmés total`);
   } catch(e) {
-    addLog('err', `Erreur: ${e.message}`); stats.rejected++;
-  } finally { isRunning = false; }
+    addLog('err',`Erreur: ${e.message}`);
+    stats.rejected++;
+  } finally {
+    isRunning = false;
+  }
 }
 
 function startPolling() {
-  if (pollTimer) return; botActive = true;
-  addLog('ok', `Bot démarré — ${cfg.pollInterval}s`);
-  runCycle(); pollTimer = setInterval(runCycle, cfg.pollInterval*1000);
-}
-function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  botActive = false; addLog('warn', 'Bot arrêté');
+  if (pollTimer) return;
+  botActive = true;
+  addLog('ok',`Bot démarré — ${cfg.pollInterval}s`);
+  runCycle();
+  pollTimer = setInterval(runCycle, cfg.pollInterval*1000);
 }
 
-// ── Dashboard ─────────────────────────────────────────────────
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  botActive = false;
+  addLog('warn','Bot arrêté');
+}
+
+// ── Dashboard ────────────────────────────────────────────────────
 app.get('/', (req,res) => {
   const logHtml = logs.slice(0,120).map(e => {
     const cls = e.type==='ok'?'ok':e.type==='err'?'er':e.type==='warn'?'wa':e.type==='dot'?'dt':'in';
     const ic  = e.type==='ok'?'✔':e.type==='err'?'✘':e.type==='warn'?'⚠':e.type==='dot'?'◉':'▸';
     return `<div class="le ${cls}"><span class="lt">${e.ts}</span><span>${ic} ${e.msg}</span></div>`;
   }).join('');
-  const hasSession = getCookieStr().length > 20;
+
+  const hasSession  = getCookieStr().length > 20;
   const cookieAlert = !hasSession ? `<div class="alert-box">
     <div class="alert-title">🍪 Cookies my-managment requis</div>
     <div class="alert-body">my-managment utilise un reCAPTCHA — connexion auto impossible.<br>
@@ -614,8 +535,8 @@ app.get('/', (req,res) => {
     3. Clic droit → Copy all as JSON<br>
     4. Colle ci-dessous et clique Injecter</div>
     <form method="POST" action="/inject-cookies">
-      <textarea name="cookies" placeholder='[{"name":"auid","value":"..."},{"name":"PHPSESSID","value":"..."}]'></textarea>
-      <button class="btn btn-inject" type="submit">🍪 Injecter les cookies</button>
+    <textarea name="cookies" placeholder='[{"name":"auid","value":"..."},{"name":"PHPSESSID","value":"..."}]'></textarea>
+    <button class="btn btn-inject" type="submit">🍪 Injecter les cookies</button>
     </form></div>` : '';
 
   res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
@@ -673,65 +594,59 @@ input:focus,select:focus,textarea:focus{border-color:var(--b)}
 .net-mtn{background:rgba(255,215,0,.1);color:#ffd700;border:1px solid rgba(255,215,0,.3)}
 .net-moov{background:rgba(88,166,255,.15);color:var(--b);border:1px solid rgba(88,166,255,.3)}
 </style></head><body><div class="wrap">
-
 ${cookieAlert}
-
 <div class="statbar">
-<div class="sc vc"><div class="sv">${stats.confirmed}</div><div class="sl">Confirmés</div></div>
-<div class="sc vm"><div class="sv">${stats.missing}</div><div class="sl">Manquants</div></div>
-<div class="sc vf"><div class="sv">${stats.fixed}</div><div class="sl">Corrigés</div></div>
-<div class="sc vp"><div class="sv">${stats.polls}</div><div class="sl">Polls</div></div>
-<div class="sc vs"><div class="sv">0</div><div class="sl">SMS</div></div>
-<div class="sc vr"><div class="sv">${stats.rejected}</div><div class="sl">Rejetés</div></div>
+  <div class="sc vc"><div class="sv">${stats.confirmed}</div><div class="sl">Confirmés</div></div>
+  <div class="sc vm"><div class="sv">${stats.missing}</div><div class="sl">Manquants</div></div>
+  <div class="sc vf"><div class="sv">${stats.fixed}</div><div class="sl">Corrigés</div></div>
+  <div class="sc vp"><div class="sv">${stats.polls}</div><div class="sl">Polls</div></div>
+  <div class="sc vs"><div class="sv">0</div><div class="sl">SMS</div></div>
+  <div class="sc vr"><div class="sv">${stats.rejected}</div><div class="sl">Rejetés</div></div>
 </div>
-
 <div class="card"><div class="ch"><span>🔑</span> COMPTES</div><div class="cb">
-<form method="POST" action="/save-accounts"><div class="g2">
-<div><div class="seclbl" style="color:var(--b)">agg.yapson.net</div>
-<div class="frow"><label>Token yapson</label>
-<input type="password" name="yapsonToken" value="${cfg.yapsonToken?'●'.repeat(20):''}" placeholder="eyJhbGci...">
-${cfg.yapsonToken?'<span class="tag-ok">✓ OK</span>':'<span class="tag-err">✗ manquant</span>'}
-</div></div>
-<div><div class="seclbl" style="color:var(--g)">my-managment.com</div>
-<div class="frow"><label>Cookies de session</label>
-<textarea name="mgmtCookies" rows="3" placeholder='[{"name":"auid",...}] ou PHPSESSID=...; auid=...'>${cfg.mgmtCookies?'(configuré — coller pour remplacer)':''}</textarea>
-${hasSession?'<span class="tag-ok">✓ Session active</span>':'<span class="tag-err">✗ Requis</span>'}
-</div>
-<div class="hint ${hasSession?'hint-g':'hint-w'}" style="font-size:9px">${hasSession?'✔ Session active — expire ~12h':'⚠ Coller JSON Firefox ou PHPSESSID=...; auid=...'}</div>
-</div></div>
-<div style="margin-top:14px"><button class="btn btn-save" type="submit">💾 Sauvegarder</button></div>
-</form></div></div>
-
+  <form method="POST" action="/save-accounts"><div class="g2">
+    <div><div class="seclbl" style="color:var(--b)">agg.yapson.net</div>
+      <div class="frow"><label>Token yapson</label>
+        <input type="password" name="yapsonToken" value="${cfg.yapsonToken?'●'.repeat(20):''}" placeholder="eyJhbGci...">
+        ${cfg.yapsonToken?'<span class="tag-ok">✓ OK</span>':'<span class="tag-err">✗ manquant</span>'}
+      </div></div>
+    <div><div class="seclbl" style="color:var(--g)">my-managment.com</div>
+      <div class="frow"><label>Cookies de session</label>
+        <textarea name="mgmtCookies" rows="3" placeholder='[{"name":"auid",...}] ou PHPSESSID=...; auid=...'>${cfg.mgmtCookies?'(configuré — coller pour remplacer)':''}</textarea>
+        ${hasSession?'<span class="tag-ok">✓ Session active</span>':'<span class="tag-err">✗ Requis</span>'}
+      </div>
+      <div class="hint ${hasSession?'hint-g':'hint-w'}" style="font-size:9px">${hasSession?'✔ Session active — expire ~12h':'⚠ Coller JSON Firefox ou PHPSESSID=...; auid=...'}</div>
+    </div></div>
+    <div style="margin-top:14px"><button class="btn btn-save" type="submit">💾 Sauvegarder</button></div>
+  </form></div></div>
 <div class="card"><div class="ch"><span>⚙️</span> CONFIGURATION</div><div class="cb">
-<form method="POST" action="/save-config">
-<div class="frow"><div class="inline">
-<span class="il">Intervalle :</span><input type="number" name="pollInterval" value="${cfg.pollInterval}" min="60" max="86400" style="width:90px"><span class="il">s</span>
-<span class="il" style="margin-left:16px">Solde max :</span><input type="number" name="maxSolde" value="${cfg.maxSolde}" min="0" style="width:120px"><span class="il">FCFA (0 = illimité)</span>
-</div></div>
-<div class="frow" style="margin-top:8px">
-<div style="font-size:10px;color:var(--m)">Réseaux auto-détectés via le titre my-managment :</div>
-<div style="margin-top:6px">
-<span class="net-badge net-wave">Wave → Wave</span>
-<span class="net-badge net-orange">Orange → Orangeint</span>
-<span class="net-badge net-mtn">MTN → MTN CI</span>
-<span class="net-badge net-moov">Moov → MOOV CI</span>
-</div>
-</div>
-<div style="margin-top:14px"><button class="btn btn-save" type="submit">💾 Appliquer</button></div>
-</form></div></div>
-
+  <form method="POST" action="/save-config">
+    <div class="frow"><div class="inline">
+      <span class="il">Intervalle :</span><input type="number" name="pollInterval" value="${cfg.pollInterval}" min="60" max="86400" style="width:90px"><span class="il">s</span>
+      <span class="il" style="margin-left:16px">Solde max :</span><input type="number" name="maxSolde" value="${cfg.maxSolde}" min="0" style="width:120px"><span class="il">FCFA (0 = illimité)</span>
+    </div></div>
+    <div class="frow" style="margin-top:8px">
+      <div style="font-size:10px;color:var(--m)">Réseaux auto-détectés via le titre my-managment :</div>
+      <div style="margin-top:6px">
+        <span class="net-badge net-wave">Wave → Wave</span>
+        <span class="net-badge net-orange">Orange → Orangeint</span>
+        <span class="net-badge net-mtn">MTN → MTN CI</span>
+        <span class="net-badge net-moov">Moov → MOOV CI</span>
+      </div>
+    </div>
+    <div style="margin-top:14px"><button class="btn btn-save" type="submit">💾 Appliquer</button></div>
+  </form></div></div>
 <div class="card"><div class="ch"><span>▶</span> CONTRÔLES</div><div class="cb">
-<span class="${botActive?'badge b-on':'badge b-off'}"><span class="dot"></span>${botActive?'Actif — toutes les '+cfg.pollInterval+'s':'Arrêté'}</span>
-<div class="btns" style="margin-top:14px">
-<a class="btn ${botActive?'btn-gray':'btn-go'}" href="/start">▶ Démarrer</a>
-<a class="btn ${botActive?'btn-stop':'btn-gray'}" href="/stop">■ Arrêter</a>
-<a class="btn btn-gray" href="/run">↻ Lancer cycle</a>
-<a class="btn btn-gray" href="/reset">◌ Reset stats</a>
-<a class="btn btn-gray" href="/">⟳ Actualiser</a>
-</div></div></div>
-
+  <span class="${botActive?'badge b-on':'badge b-off'}"><span class="dot"></span>${botActive?'Actif — toutes les '+cfg.pollInterval+'s':'Arrêté'}</span>
+  <div class="btns" style="margin-top:14px">
+    <a class="btn ${botActive?'btn-gray':'btn-go'}" href="/start">▶ Démarrer</a>
+    <a class="btn ${botActive?'btn-stop':'btn-gray'}" href="/stop">■ Arrêter</a>
+    <a class="btn btn-gray" href="/run">↻ Lancer cycle</a>
+    <a class="btn btn-gray" href="/reset">◌ Reset stats</a>
+    <a class="btn btn-gray" href="/">⟳ Actualiser</a>
+  </div></div></div>
 <div class="card"><div class="ch"><span>📋</span> JOURNAL — ${logs.length} entrées</div>
-<div class="cb" style="padding:8px"><div class="log">${logHtml||'<div class="le in"><span class="lt">—</span><span>▸ En attente</span></div>'}</div>
+  <div class="cb" style="padding:8px"><div class="log">${logHtml||'<div class="le in"><span class="lt">—</span><span>▸ En attente</span></div>'}</div>
 </div></div>
 </div></body></html>`);
 });
@@ -744,35 +659,38 @@ app.post('/inject-cookies',(req,res) => {
   if(!botActive&&cfg.yapsonToken) startPolling();
   res.redirect('/');
 });
+
 app.post('/save-accounts',(req,res) => {
   const{yapsonToken,mgmtCookies}=req.body;
-  if(yapsonToken&&!yapsonToken.startsWith('●'))cfg.yapsonToken=yapsonToken.trim();
-  if(mgmtCookies&&!mgmtCookies.includes('configuré'))cfg.mgmtCookies=mgmtCookies.trim();
+  if(yapsonToken&&!yapsonToken.startsWith('●')) cfg.yapsonToken=yapsonToken.trim();
+  if(mgmtCookies&&!mgmtCookies.includes('configuré')) cfg.mgmtCookies=mgmtCookies.trim();
   addLog('ok',`Comptes mis à jour`);
   if(botActive){stopPolling();setTimeout(startPolling,500);}
   res.redirect('/');
 });
+
 app.post('/save-config',(req,res) => {
   const{pollInterval,maxSolde}=req.body;
-  if(pollInterval)cfg.pollInterval=Math.max(60,parseInt(pollInterval));
-  if(maxSolde!==undefined)cfg.maxSolde=parseInt(maxSolde)||0;
+  if(pollInterval) cfg.pollInterval=Math.max(60,parseInt(pollInterval));
+  if(maxSolde!==undefined) cfg.maxSolde=parseInt(maxSolde)||0;
   addLog('ok',`Config: intervalle=${cfg.pollInterval}s`);
   if(botActive){stopPolling();setTimeout(startPolling,500);}
   res.redirect('/');
 });
-app.get('/start', (req,res)=>{startPolling();res.redirect('/');});
-app.get('/stop',  (req,res)=>{stopPolling(); res.redirect('/');});
-app.get('/run',   async(req,res)=>{runCycle().catch(e=>addLog('err',e.message));res.redirect('/');});
-app.get('/reset', (req,res)=>{Object.keys(stats).forEach(k=>stats[k]=0);logs.length=0;addLog('info','Reset');res.redirect('/');});
-app.get('/health',(req,res)=>res.json({...stats,botActive,interval:cfg.pollInterval,hasSession:getCookieStr().length>20}));
-app.get('/cookies',(req,res)=>res.redirect('/'));
+
+app.get('/start', (req,res) => { startPolling(); res.redirect('/'); });
+app.get('/stop',  (req,res) => { stopPolling();  res.redirect('/'); });
+app.get('/run',   async(req,res) => { runCycle().catch(e=>addLog('err',e.message)); res.redirect('/'); });
+app.get('/reset', (req,res) => { Object.keys(stats).forEach(k=>stats[k]=0); logs.length=0; addLog('info','Reset'); res.redirect('/'); });
+app.get('/health',(req,res) => res.json({...stats,botActive,interval:cfg.pollInterval,hasSession:getCookieStr().length>20}));
+app.get('/cookies',(req,res) => res.redirect('/'));
 
 app.listen(PORT, () => {
-  addLog('info', `YapsonBot7-E démarré — port ${PORT}`);
-  addLog('info', `Intervalle: ${cfg.pollInterval}s | report_id: ${cfg.reportId}`);
+  addLog('info',`YapsonBot7-E démarré — port ${PORT}`);
+  addLog('info',`Intervalle: ${cfg.pollInterval}s | report_id: ${cfg.reportId}`);
   const p = parseCookies(cfg.mgmtCookies);
   if(p && cfg.yapsonToken) {
-    addLog('info', `Cookies: ${p.split(';').length} ok | Token: OK`);
+    addLog('info',`Cookies: ${p.split(';').length} ok | Token: OK`);
     startPolling();
   } else {
     addLog('warn','Configurer cookies + token dans le dashboard');
